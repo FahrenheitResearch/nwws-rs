@@ -237,11 +237,14 @@ pub struct MessageSummary {
     pub heading: String,
     pub ttaaii: String,
     pub cccc: String,
+    pub office: String,
     pub yygggg: String,
     pub bbb: Option<String>,
     pub awips_id: Option<String>,
     pub family: String,
     pub semantic_fingerprint: String,
+    pub raw_bulletin_blake3: String,
+    pub archive_id: String,
     pub segment_count: usize,
     pub segments: Vec<SegmentSummary>,
     pub raw_bulletin: String,
@@ -273,6 +276,7 @@ impl MessageSummary {
             heading: bulletin.heading.to_string(),
             ttaaii: bulletin.heading.ttaaii().to_owned(),
             cccc: bulletin.heading.cccc().to_owned(),
+            office: bulletin.heading.cccc().to_owned(),
             yygggg: bulletin.heading.yygggg().to_owned(),
             bbb: bulletin.heading.bbb().map(str::to_owned),
             awips_id: bulletin
@@ -281,6 +285,10 @@ impl MessageSummary {
                 .map(|value| value.raw().to_owned()),
             family: family_name(content.product.family),
             semantic_fingerprint: semantic_fingerprint(content),
+            raw_bulletin_blake3: blake3::hash(bulletin.bulletin.as_bytes())
+                .to_hex()
+                .to_string(),
+            archive_id: archive_digest(bulletin.bulletin.as_bytes()),
             segment_count: segments.len(),
             segments,
             raw_bulletin: bulletin.bulletin.to_owned(),
@@ -1264,6 +1272,9 @@ mod tests {
 
         assert_eq!(report.messages.len(), 1);
         assert_eq!(report.messages[0].family, "tornado");
+        assert_eq!(report.messages[0].office, "KLOT");
+        assert_eq!(report.messages[0].raw_bulletin_blake3.len(), 64);
+        assert_eq!(report.messages[0].archive_id.len(), 16);
         assert_eq!(report.messages[0].segments.len(), 1);
         assert_eq!(
             report.messages[0].segments[0].tornado_tag,

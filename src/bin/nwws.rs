@@ -11,6 +11,8 @@ use nwws_rs::{
     ParsedInput, ProductFamily, TransportDescriptor, TransportKind, collect_input_paths,
     infer_hint_from_path, parse_with_hint,
 };
+use serde::Serialize;
+use serde_json::json;
 use time::format_description::well_known::Rfc3339;
 
 fn main() {
@@ -35,13 +37,13 @@ fn run(mut args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
         }
         "inspect" => {
             let path = take_path_arg("inspect", &mut args)?;
-            let hint = parse_optional_hint("inspect", &mut args)?;
-            inspect_command(&path, hint)
+            let options = parse_command_options("inspect", &mut args)?;
+            inspect_command(&path, options.hint, options.output)
         }
         "replay" => {
             let path = take_path_arg("replay", &mut args)?;
-            let hint = parse_optional_hint("replay", &mut args)?;
-            replay_command(&path, hint)
+            let options = parse_command_options("replay", &mut args)?;
+            replay_command(&path, options.hint, options.output)
         }
         "summary" => {
             let path = take_path_arg("summary", &mut args)?;
@@ -69,8 +71,8 @@ fn pid201_command(args: &mut impl Iterator<Item = OsString>) -> Result<(), CliEr
     match command.to_string_lossy().as_ref() {
         "inspect" => {
             let path = take_path_arg("pid201 inspect", args)?;
-            ensure_no_extra_args("pid201 inspect", args)?;
-            inspect_command(&path, Some(IngestHint::SatellitePid201))
+            let output = parse_output_options("pid201 inspect", args)?;
+            inspect_command(&path, Some(IngestHint::SatellitePid201), output)
         }
         "split" => {
             let input = take_path_arg("pid201 split", args)?;
@@ -81,8 +83,8 @@ fn pid201_command(args: &mut impl Iterator<Item = OsString>) -> Result<(), CliEr
         "archive" => {
             let input = take_path_arg("pid201 archive", args)?;
             let archive = take_path_arg("pid201 archive", args)?;
-            ensure_no_extra_args("pid201 archive", args)?;
-            archive_import_command(&input, &archive, Some(IngestHint::SatellitePid201))
+            let output = parse_output_options("pid201 archive", args)?;
+            archive_import_command(&input, &archive, Some(IngestHint::SatellitePid201), output)
         }
         other => Err(CliError::usage(format!(
             "unknown pid201 subcommand {other}\n\n{}",
@@ -103,13 +105,13 @@ fn archive_command(args: &mut impl Iterator<Item = OsString>) -> Result<(), CliE
         "import" => {
             let input = take_path_arg("archive import", args)?;
             let archive = take_path_arg("archive import", args)?;
-            let hint = parse_optional_hint("archive import", args)?;
-            archive_import_command(&input, &archive, hint)
+            let options = parse_command_options("archive import", args)?;
+            archive_import_command(&input, &archive, options.hint, options.output)
         }
         "verify" => {
             let archive = take_path_arg("archive verify", args)?;
-            ensure_no_extra_args("archive verify", args)?;
-            archive_verify_command(&archive)
+            let output = parse_output_options("archive verify", args)?;
+            archive_verify_command(&archive, output)
         }
         other => Err(CliError::usage(format!(
             "unknown archive subcommand {other}\n\n{}",
@@ -150,15 +152,15 @@ fn oi_command(args: &mut impl Iterator<Item = OsString>) -> Result<(), CliError>
 
 fn usage() -> &'static str {
     "usage:
-  cargo run --bin nwws -- inspect <file> [--hint <auto|oi|pid201|bulletin|stream>]
-  cargo run --bin nwws -- replay <directory> [--hint <auto|oi|pid201|bulletin|stream>]
+  cargo run --bin nwws -- inspect <file> [--hint <auto|oi|pid201|bulletin|stream>] [--format <text|json|jsonl|tool-result>]
+  cargo run --bin nwws -- replay <directory> [--hint <auto|oi|pid201|bulletin|stream>] [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- summary <file-or-directory> [--hint <auto|oi|pid201|bulletin|stream>]
   cargo run --bin nwws -- oi connect <username> <password> [--count <n>] [--history <n>]
-  cargo run --bin nwws -- pid201 inspect <capture-file>
+  cargo run --bin nwws -- pid201 inspect <capture-file> [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- pid201 split <capture-file> <output-dir>
-  cargo run --bin nwws -- pid201 archive <capture-file> <archive-dir>
-  cargo run --bin nwws -- archive import <input-path> <archive-dir> [--hint <auto|oi|pid201|bulletin|stream>]
-  cargo run --bin nwws -- archive verify <archive-dir>
+  cargo run --bin nwws -- pid201 archive <capture-file> <archive-dir> [--format <text|json|jsonl|tool-result>]
+  cargo run --bin nwws -- archive import <input-path> <archive-dir> [--hint <auto|oi|pid201|bulletin|stream>] [--format <text|json|jsonl|tool-result>]
+  cargo run --bin nwws -- archive verify <archive-dir> [--format <text|json|jsonl|tool-result>]
 
 commands:
   inspect          parse one file and print detailed NWWS metadata
@@ -172,6 +174,7 @@ commands:
   archive verify   re-parse archived records and validate the stored digests
 
 notes:
+  Machine-readable modes are available with --format json, --format jsonl, or --format tool-result.
   The CLI supports both archived NWWS-OI XML inspection and live `oi connect` session workflows."
 }
 
@@ -217,6 +220,114 @@ fn parse_optional_hint(
     }
 
     Ok(hint)
+}
+
+fn parse_command_options(
+    command: &str,
+    args: &mut impl Iterator<Item = OsString>,
+) -> Result<CommandOptions, CliError> {
+    let mut options = CommandOptions::default();
+
+    while let Some(arg) = args.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--hint" => {
+                if options.hint.is_some() {
+                    return Err(CliError::usage(format!(
+                        "duplicate --hint for {command}\n\n{}",
+                        usage()
+                    )));
+                }
+                let Some(value) = args.next() else {
+                    return Err(CliError::usage(format!(
+                        "missing value for --hint in {command}\n\n{}",
+                        usage()
+                    )));
+                };
+                options.hint = Some(parse_hint_value(&value.to_string_lossy())?);
+            }
+            "--format" => {
+                if options.output != OutputFormat::Text {
+                    return Err(CliError::usage(format!(
+                        "duplicate --format for {command}\n\n{}",
+                        usage()
+                    )));
+                }
+                let Some(value) = args.next() else {
+                    return Err(CliError::usage(format!(
+                        "missing value for --format in {command}\n\n{}",
+                        usage()
+                    )));
+                };
+                options.output = parse_output_format(&value.to_string_lossy())?;
+            }
+            "--json" => set_output_flag(command, &mut options.output, OutputFormat::Json)?,
+            "--jsonl" => set_output_flag(command, &mut options.output, OutputFormat::Jsonl)?,
+            "--tool-result" => {
+                set_output_flag(command, &mut options.output, OutputFormat::ToolResult)?
+            }
+            other => {
+                return Err(CliError::usage(format!(
+                    "unexpected extra argument for {command}: {other}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+    }
+
+    Ok(options)
+}
+
+fn parse_output_options(
+    command: &str,
+    args: &mut impl Iterator<Item = OsString>,
+) -> Result<OutputFormat, CliError> {
+    let mut output = OutputFormat::Text;
+
+    while let Some(arg) = args.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--format" => {
+                if output != OutputFormat::Text {
+                    return Err(CliError::usage(format!(
+                        "duplicate --format for {command}\n\n{}",
+                        usage()
+                    )));
+                }
+                let Some(value) = args.next() else {
+                    return Err(CliError::usage(format!(
+                        "missing value for --format in {command}\n\n{}",
+                        usage()
+                    )));
+                };
+                output = parse_output_format(&value.to_string_lossy())?;
+            }
+            "--json" => set_output_flag(command, &mut output, OutputFormat::Json)?,
+            "--jsonl" => set_output_flag(command, &mut output, OutputFormat::Jsonl)?,
+            "--tool-result" => set_output_flag(command, &mut output, OutputFormat::ToolResult)?,
+            other => {
+                return Err(CliError::usage(format!(
+                    "unexpected extra argument for {command}: {other}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn set_output_flag(
+    command: &str,
+    output: &mut OutputFormat,
+    value: OutputFormat,
+) -> Result<(), CliError> {
+    if *output != OutputFormat::Text {
+        return Err(CliError::usage(format!(
+            "duplicate output format for {command}\n\n{}",
+            usage()
+        )));
+    }
+    *output = value;
+    Ok(())
 }
 
 fn parse_oi_connect_options(
@@ -328,6 +439,19 @@ fn parse_hint_value(raw: &str) -> Result<IngestHint, CliError> {
     }
 }
 
+fn parse_output_format(raw: &str) -> Result<OutputFormat, CliError> {
+    match raw.to_ascii_lowercase().as_str() {
+        "text" => Ok(OutputFormat::Text),
+        "json" => Ok(OutputFormat::Json),
+        "jsonl" | "json-lines" | "ndjson" => Ok(OutputFormat::Jsonl),
+        "tool-result" | "tool_result" | "wx.tool_result.v1" => Ok(OutputFormat::ToolResult),
+        _ => Err(CliError::usage(format!(
+            "unknown output format {raw}\n\n{}",
+            usage()
+        ))),
+    }
+}
+
 fn ensure_no_extra_args(
     command: &str,
     args: &mut impl Iterator<Item = OsString>,
@@ -343,15 +467,77 @@ fn ensure_no_extra_args(
     Ok(())
 }
 
-fn inspect_command(path: &Path, hint: Option<IngestHint>) -> Result<(), CliError> {
+fn inspect_command(
+    path: &Path,
+    hint: Option<IngestHint>,
+    output: OutputFormat,
+) -> Result<(), CliError> {
     ensure_file(path, "inspect")?;
-    let report = inspect_path(path, hint)?;
-    print_inspect_report(path, &report);
+    match output {
+        OutputFormat::Text => {
+            let report = inspect_path(path, hint)?;
+            print_inspect_report(path, &report);
+        }
+        OutputFormat::Json => {
+            let report = nwws_rs::api::inspect_path(path, hint).map_err(|err| {
+                CliError::failure(format!("failed to inspect {}: {err}", path.display()))
+            })?;
+            print_json(&report)?;
+        }
+        OutputFormat::Jsonl => {
+            let report = nwws_rs::api::inspect_path(path, hint).map_err(|err| {
+                CliError::failure(format!("failed to inspect {}: {err}", path.display()))
+            })?;
+            print_inspection_jsonl(&report)?;
+        }
+        OutputFormat::ToolResult => {
+            let report = nwws_rs::api::inspect_path(path, hint).map_err(|err| {
+                CliError::failure(format!("failed to inspect {}: {err}", path.display()))
+            })?;
+            print_tool_result(
+                "inspect",
+                "ok",
+                &report,
+                tool_provenance("inspect", path, None),
+            )?;
+        }
+    }
     Ok(())
 }
 
-fn replay_command(path: &Path, hint: Option<IngestHint>) -> Result<(), CliError> {
+fn replay_command(
+    path: &Path,
+    hint: Option<IngestHint>,
+    output: OutputFormat,
+) -> Result<(), CliError> {
     ensure_directory(path, "replay")?;
+    if output != OutputFormat::Text {
+        let report = nwws_rs::api::scan_path(path, hint).map_err(|err| {
+            CliError::failure(format!("failed to replay {}: {err}", path.display()))
+        })?;
+        match output {
+            OutputFormat::Json => print_json(&report)?,
+            OutputFormat::Jsonl => print_scan_jsonl(&report)?,
+            OutputFormat::ToolResult => {
+                let status = if report.failures == 0 { "ok" } else { "error" };
+                print_tool_result(
+                    "replay",
+                    status,
+                    &report,
+                    tool_provenance("replay", path, None),
+                )?;
+            }
+            OutputFormat::Text => unreachable!(),
+        }
+        if report.failures > 0 {
+            return Err(CliError::failure(format!(
+                "replay finished with {} parse failure(s)",
+                report.failures
+            )));
+        }
+        return Ok(());
+    }
+
     let scan_root = resolve_scan_root(path);
     let files = collect_files(&scan_root)?;
     let mut summary = ScanSummary::default();
@@ -527,7 +713,12 @@ fn archive_import_command(
     input: &Path,
     archive_dir: &Path,
     hint_override: Option<IngestHint>,
+    output: OutputFormat,
 ) -> Result<(), CliError> {
+    if output != OutputFormat::Text {
+        return archive_import_machine_command(input, archive_dir, hint_override, output);
+    }
+
     if !input.exists() {
         return Err(CliError::failure(format!(
             "path does not exist for archive import: {}",
@@ -624,7 +815,51 @@ fn archive_import_command(
     Ok(())
 }
 
-fn archive_verify_command(archive_dir: &Path) -> Result<(), CliError> {
+fn archive_import_machine_command(
+    input: &Path,
+    archive_dir: &Path,
+    hint_override: Option<IngestHint>,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    let report =
+        nwws_rs::api::archive_import(input, archive_dir, hint_override).map_err(|err| {
+            CliError::failure(format!(
+                "failed to import archive from {} into {}: {err}",
+                input.display(),
+                archive_dir.display()
+            ))
+        })?;
+
+    match output {
+        OutputFormat::Json => print_json(&report)?,
+        OutputFormat::Jsonl => print_archive_import_jsonl(&report)?,
+        OutputFormat::ToolResult => {
+            let status = if report.failures == 0 { "ok" } else { "error" };
+            print_tool_result(
+                "archive-import",
+                status,
+                &report,
+                tool_provenance("archive-import", input, Some(archive_dir)),
+            )?;
+        }
+        OutputFormat::Text => unreachable!(),
+    }
+
+    if report.failures > 0 {
+        return Err(CliError::failure(format!(
+            "archive import finished with {} failure(s)",
+            report.failures
+        )));
+    }
+
+    Ok(())
+}
+
+fn archive_verify_command(archive_dir: &Path, output: OutputFormat) -> Result<(), CliError> {
+    if output != OutputFormat::Text {
+        return archive_verify_machine_command(archive_dir, output);
+    }
+
     ensure_directory(archive_dir, "archive verify")?;
     let records_root = archive_dir.join("records");
     ensure_directory(&records_root, "archive verify")?;
@@ -706,6 +941,42 @@ fn archive_verify_command(archive_dir: &Path) -> Result<(), CliError> {
     if failures > 0 {
         return Err(CliError::failure(format!(
             "archive verify finished with {failures} failure(s)"
+        )));
+    }
+
+    Ok(())
+}
+
+fn archive_verify_machine_command(
+    archive_dir: &Path,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    let report = nwws_rs::api::archive_verify(archive_dir).map_err(|err| {
+        CliError::failure(format!(
+            "failed to verify archive {}: {err}",
+            archive_dir.display()
+        ))
+    })?;
+
+    match output {
+        OutputFormat::Json => print_json(&report)?,
+        OutputFormat::Jsonl => print_archive_verify_jsonl(&report)?,
+        OutputFormat::ToolResult => {
+            let status = if report.failures == 0 { "ok" } else { "error" };
+            print_tool_result(
+                "archive-verify",
+                status,
+                &report,
+                tool_provenance("archive-verify", archive_dir, Some(archive_dir)),
+            )?;
+        }
+        OutputFormat::Text => unreachable!(),
+    }
+
+    if report.failures > 0 {
+        return Err(CliError::failure(format!(
+            "archive verify finished with {} failure(s)",
+            report.failures
         )));
     }
 
@@ -997,6 +1268,174 @@ fn print_archive_import_summary(archive_dir: &Path, summary: &ArchiveImportSumma
             println!("  {family}: {count}");
         }
     }
+}
+
+fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
+    let payload = serde_json::to_string_pretty(value)
+        .map_err(|err| CliError::failure(format!("failed to serialize JSON output: {err}")))?;
+    println!("{payload}");
+    Ok(())
+}
+
+fn print_json_line<T: Serialize>(value: &T) -> Result<(), CliError> {
+    let payload = serde_json::to_string(value)
+        .map_err(|err| CliError::failure(format!("failed to serialize JSONL output: {err}")))?;
+    println!("{payload}");
+    Ok(())
+}
+
+fn print_inspection_jsonl(report: &nwws_rs::api::InspectionReport) -> Result<(), CliError> {
+    for (index, message) in report.messages.iter().enumerate() {
+        print_json_line(&InspectionJsonlRecord {
+            schema: "nwws.message.v1",
+            record_type: "message",
+            path: report.path.as_deref(),
+            input_kind: report.input_kind,
+            transport: &report.transport,
+            junk_bytes: report.junk_bytes,
+            pending_bytes: report.pending_bytes,
+            message_index: index + 1,
+            message,
+        })?;
+    }
+    Ok(())
+}
+
+fn print_scan_jsonl(report: &nwws_rs::api::ScanReport) -> Result<(), CliError> {
+    for file in &report.files {
+        match (&file.report, &file.error) {
+            (Some(inspection), _) => {
+                for (index, message) in inspection.messages.iter().enumerate() {
+                    print_json_line(&ScanJsonlRecord {
+                        schema: "nwws.message.v1",
+                        record_type: "message",
+                        path: &file.path,
+                        input_kind: inspection.input_kind,
+                        transport: &inspection.transport,
+                        junk_bytes: inspection.junk_bytes,
+                        pending_bytes: inspection.pending_bytes,
+                        message_index: index + 1,
+                        message,
+                    })?;
+                }
+            }
+            (None, Some(error)) => print_json_line(&ErrorJsonlRecord {
+                schema: "nwws.error.v1",
+                record_type: "error",
+                path: &file.path,
+                error,
+            })?,
+            (None, None) => {}
+        }
+    }
+    Ok(())
+}
+
+fn print_archive_import_jsonl(report: &nwws_rs::api::ArchiveImportReport) -> Result<(), CliError> {
+    for record in &report.records {
+        print_json_line(&ArchiveImportJsonlRecord {
+            schema: "nwws.archive_import.v1",
+            record_type: "archive-record",
+            archive_dir: &report.archive_dir,
+            record,
+        })?;
+    }
+    for error in &report.errors {
+        print_json_line(&ArchiveImportErrorJsonlRecord {
+            schema: "nwws.archive_import.v1",
+            record_type: "error",
+            archive_dir: &report.archive_dir,
+            error,
+        })?;
+    }
+    Ok(())
+}
+
+fn print_archive_verify_jsonl(report: &nwws_rs::api::ArchiveVerifyReport) -> Result<(), CliError> {
+    for record in &report.records {
+        print_json_line(&ArchiveVerifyJsonlRecord {
+            schema: "nwws.archive_verify.v1",
+            record_type: "archive-verify-record",
+            archive_dir: &report.archive_dir,
+            record,
+        })?;
+    }
+    Ok(())
+}
+
+fn print_tool_result<T: Serialize>(
+    operation: &str,
+    status: &str,
+    data: &T,
+    provenance: serde_json::Value,
+) -> Result<(), CliError> {
+    let data = serde_json::to_value(data)
+        .map_err(|err| CliError::failure(format!("failed to serialize tool result data: {err}")))?;
+    let envelope = json!({
+        "schema": "wx.tool_result.v1",
+        "tool": "nwws-rs",
+        "operation": operation,
+        "status": status,
+        "artifacts": [
+            {
+                "id": operation,
+                "kind": "json",
+                "media_type": "application/json",
+                "description": "Native nwws-rs parser/API output for the requested command"
+            }
+        ],
+        "evidence": tool_evidence(&data),
+        "limitations": [
+            "Output reflects parser results for the supplied local input only.",
+            "No external NWS source-of-truth or network delivery validation is performed."
+        ],
+        "provenance": provenance,
+        "data": data
+    });
+    print_json(&envelope)
+}
+
+fn tool_provenance(
+    operation: &str,
+    source_path: &Path,
+    archive_dir: Option<&Path>,
+) -> serde_json::Value {
+    json!({
+        "producer": "nwws-rs",
+        "operation": operation,
+        "source_path": source_path.display().to_string(),
+        "archive_dir": archive_dir.map(|path| path.display().to_string()),
+        "contract": "wx.tool_result.v1"
+    })
+}
+
+fn tool_evidence(data: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut evidence = Vec::new();
+    if let Some(messages) = data.get("messages").and_then(|value| value.as_array()) {
+        evidence.push(json!({
+            "kind": "parsed-messages",
+            "count": messages.len()
+        }));
+    }
+    if let Some(files) = data.get("scanned_files").and_then(|value| value.as_u64()) {
+        evidence.push(json!({
+            "kind": "scanned-files",
+            "count": files
+        }));
+    }
+    if let Some(records) = data.get("records").and_then(|value| value.as_array()) {
+        evidence.push(json!({
+            "kind": "records",
+            "count": records.len()
+        }));
+    }
+    if evidence.is_empty() {
+        evidence.push(json!({
+            "kind": "parser-output",
+            "value": "nwws-rs API report"
+        }));
+    }
+    evidence
 }
 
 fn display_path(root: &Path, path: &Path) -> String {
@@ -1310,6 +1749,87 @@ fn family_name(family: ProductFamily) -> String {
         ProductFamily::Unknown => "unknown",
     }
     .to_owned()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    Text,
+    Json,
+    Jsonl,
+    ToolResult,
+}
+
+#[derive(Debug)]
+struct CommandOptions {
+    hint: Option<IngestHint>,
+    output: OutputFormat,
+}
+
+impl Default for CommandOptions {
+    fn default() -> Self {
+        Self {
+            hint: None,
+            output: OutputFormat::Text,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct InspectionJsonlRecord<'a> {
+    schema: &'static str,
+    record_type: &'static str,
+    path: Option<&'a Path>,
+    input_kind: nwws_rs::api::InputKind,
+    transport: &'a nwws_rs::api::TransportSummary,
+    junk_bytes: usize,
+    pending_bytes: usize,
+    message_index: usize,
+    message: &'a nwws_rs::api::MessageSummary,
+}
+
+#[derive(Serialize)]
+struct ScanJsonlRecord<'a> {
+    schema: &'static str,
+    record_type: &'static str,
+    path: &'a Path,
+    input_kind: nwws_rs::api::InputKind,
+    transport: &'a nwws_rs::api::TransportSummary,
+    junk_bytes: usize,
+    pending_bytes: usize,
+    message_index: usize,
+    message: &'a nwws_rs::api::MessageSummary,
+}
+
+#[derive(Serialize)]
+struct ErrorJsonlRecord<'a> {
+    schema: &'static str,
+    record_type: &'static str,
+    path: &'a Path,
+    error: &'a str,
+}
+
+#[derive(Serialize)]
+struct ArchiveImportJsonlRecord<'a> {
+    schema: &'static str,
+    record_type: &'static str,
+    archive_dir: &'a Path,
+    record: &'a nwws_rs::api::ArchivePersistResult,
+}
+
+#[derive(Serialize)]
+struct ArchiveImportErrorJsonlRecord<'a> {
+    schema: &'static str,
+    record_type: &'static str,
+    archive_dir: &'a Path,
+    error: &'a nwws_rs::api::ArchiveFailure,
+}
+
+#[derive(Serialize)]
+struct ArchiveVerifyJsonlRecord<'a> {
+    schema: &'static str,
+    record_type: &'static str,
+    archive_dir: &'a Path,
+    record: &'a nwws_rs::api::ArchiveVerifyRecord,
 }
 
 #[derive(Debug)]

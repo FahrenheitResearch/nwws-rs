@@ -209,6 +209,8 @@ cargo run --bin nwws -- archive import <input-path> <archive-dir>
 cargo run --bin nwws -- archive verify <archive-dir>
 ```
 
+Inspection, replay, PID201 inspect/archive, and archive import/verify support machine-readable output with `--format json`, `--format jsonl`, or `--format tool-result`. JSON output uses the same API inspection/archive structures exposed to Python, including WMO heading parts, office, AWIPS/PIL, product family, UGC, VTEC, LAT/LON, TIME/MOT/LOC, semantic fingerprints, raw bulletin BLAKE3 hashes, and archive IDs. `--format tool-result` wraps the report in a `wx.tool_result.v1` envelope with `artifacts`, `evidence`, `limitations`, and `provenance`.
+
 `archive import` writes canonical bulletin records under `archive/records/` and appends a `records.tsv` manifest. Re-importing the same bulletin from raw WMO, NWWS-OI XML, or PID201 captures deduplicates by normalized bulletin content.
 
 ## Advanced Overview
