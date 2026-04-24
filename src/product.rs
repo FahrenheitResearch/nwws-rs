@@ -5,7 +5,7 @@ use crate::geo::{LatLonBlock, TimeMotLoc};
 use crate::header::AwipsId;
 use crate::oi::{NwwsOiMessage, NwwsOiPayload};
 use crate::ugc::UgcString;
-use crate::vtec::{Hvtec, Phenomenon, Pvtec};
+use crate::vtec::{Hvtec, Phenomenon, Pvtec, VtecAction};
 use crate::wmo::WmoMessage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -122,6 +122,10 @@ pub struct ProductSegment<'a> {
 }
 
 impl<'a> ProductSegment<'a> {
+    pub fn warning_tags(&self) -> WarningParsedTags {
+        WarningParsedTags::from_segment(self)
+    }
+
     fn parse(
         body: &'a str,
         lines: &[LineRef<'a>],
@@ -260,6 +264,122 @@ pub enum SegmentTag<'a> {
     HailInches(f32),
     WindMph(u16),
     DamageThreat(&'a str),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct WarningParsedTags {
+    pub text_tags: Vec<WarningTextTag>,
+    pub actions: Vec<WarningActionTag>,
+}
+
+impl WarningParsedTags {
+    pub fn extract_text(lines: &[&str]) -> Self {
+        Self {
+            text_tags: extract_warning_text_tags(lines),
+            actions: Vec::new(),
+        }
+    }
+
+    pub fn from_segment(segment: &ProductSegment<'_>) -> Self {
+        Self {
+            text_tags: extract_warning_text_tags(&segment.body_lines),
+            actions: extract_warning_actions(&segment.pvtec),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarningTextTagKind {
+    Tornado,
+    HailThreat,
+    MaxHailSize,
+    WindThreat,
+    MaxWindGust,
+    FlashFloodDamageThreat,
+    TstmDamageThreat,
+    TornadoDamageThreat,
+    Threat,
+    Source,
+    Impact,
+}
+
+impl WarningTextTagKind {
+    fn from_normalized_name(name: &str) -> Option<Self> {
+        match name {
+            "TORNADO" => Some(Self::Tornado),
+            "HAIL THREAT" => Some(Self::HailThreat),
+            "MAX HAIL SIZE" => Some(Self::MaxHailSize),
+            "WIND THREAT" => Some(Self::WindThreat),
+            "MAX WIND GUST" => Some(Self::MaxWindGust),
+            "FLASH FLOOD DAMAGE THREAT" => Some(Self::FlashFloodDamageThreat),
+            "TSTM DAMAGE THREAT" => Some(Self::TstmDamageThreat),
+            "TORNADO DAMAGE THREAT" => Some(Self::TornadoDamageThreat),
+            "THREAT" => Some(Self::Threat),
+            "SOURCE" => Some(Self::Source),
+            "IMPACT" => Some(Self::Impact),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WarningTextTag {
+    pub kind: WarningTextTagKind,
+    pub raw_line: String,
+    pub raw_name: String,
+    pub raw_value: String,
+    pub normalized_value: String,
+    pub numeric_value: Option<f32>,
+    pub unit: Option<String>,
+    pub line_number: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarningActionKind {
+    New,
+    Continue,
+    ExtendTime,
+    ExtendArea,
+    ExtendAreaAndTime,
+    Upgrade,
+    Cancel,
+    Expire,
+    Correction,
+    Routine,
+}
+
+impl WarningActionKind {
+    fn from_vtec(action: VtecAction) -> Self {
+        match action {
+            VtecAction::New => Self::New,
+            VtecAction::Continue => Self::Continue,
+            VtecAction::ExtendTime => Self::ExtendTime,
+            VtecAction::ExtendArea => Self::ExtendArea,
+            VtecAction::ExtendAreaAndTime => Self::ExtendAreaAndTime,
+            VtecAction::Upgrade => Self::Upgrade,
+            VtecAction::Cancel => Self::Cancel,
+            VtecAction::Expire => Self::Expire,
+            VtecAction::Correction => Self::Correction,
+            VtecAction::Routine => Self::Routine,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarningActionSource {
+    Pvtec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WarningActionTag {
+    pub source: WarningActionSource,
+    pub action: String,
+    pub normalized_action: WarningActionKind,
+    pub raw: String,
+    pub vtec_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -461,6 +581,92 @@ fn extract_time_mot_loc<'a>(lines: &[LineRef<'a>]) -> Result<Option<TimeMotLoc<'
     Ok(None)
 }
 
+fn extract_warning_text_tags(lines: &[&str]) -> Vec<WarningTextTag> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| parse_warning_text_tag(line, index + 1))
+        .collect()
+}
+
+fn parse_warning_text_tag(line: &str, line_number: usize) -> Option<WarningTextTag> {
+    let raw_line = line.trim();
+    let (raw_name, raw_value) = raw_line.split_once("...")?;
+    let raw_name = raw_name.trim().trim_start_matches('*').trim();
+    let raw_value = raw_value.trim();
+    let normalized_name = normalize_warning_value(raw_name);
+    let kind = WarningTextTagKind::from_normalized_name(&normalized_name)?;
+    let normalized_value = normalize_warning_value(raw_value);
+    let (numeric_value, unit) = warning_tag_measurement(kind, raw_value);
+
+    Some(WarningTextTag {
+        kind,
+        raw_line: raw_line.to_owned(),
+        raw_name: raw_name.to_owned(),
+        raw_value: raw_value.to_owned(),
+        normalized_value,
+        numeric_value,
+        unit,
+        line_number,
+    })
+}
+
+fn extract_warning_actions(pvtec: &[Pvtec]) -> Vec<WarningActionTag> {
+    pvtec
+        .iter()
+        .enumerate()
+        .map(|(index, code)| WarningActionTag {
+            source: WarningActionSource::Pvtec,
+            action: code.action().as_str().to_owned(),
+            normalized_action: WarningActionKind::from_vtec(code.action()),
+            raw: code.raw().to_owned(),
+            vtec_index: index + 1,
+        })
+        .collect()
+}
+
+fn warning_tag_measurement(
+    kind: WarningTextTagKind,
+    raw_value: &str,
+) -> (Option<f32>, Option<String>) {
+    match kind {
+        WarningTextTagKind::MaxHailSize => measurement_value(raw_value, "IN")
+            .map_or((None, None), |value| {
+                (Some(round_measurement(value)), Some("in".to_owned()))
+            }),
+        WarningTextTagKind::MaxWindGust => measurement_value(raw_value, "MPH")
+            .map_or((None, None), |value| {
+                (Some(round_measurement(value)), Some("mph".to_owned()))
+            }),
+        _ => (None, None),
+    }
+}
+
+fn measurement_value(raw_value: &str, unit: &str) -> Option<f32> {
+    let compact = raw_value
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let end = compact.find(unit)?;
+    compact[..end]
+        .trim_start_matches(['<', '>'])
+        .parse::<f32>()
+        .ok()
+}
+
+fn normalize_warning_value(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase()
+}
+
+fn round_measurement(value: f32) -> f32 {
+    (value * 100.0).round() / 100.0
+}
+
 fn parse_numeric_tag(line: &str, prefix: &str, suffix: &str) -> Option<f32> {
     let start = line.find(prefix)? + prefix.len();
     let tail = &line[start..];
@@ -485,7 +691,10 @@ fn parse_integer_tag(line: &str, prefix: &str, suffix: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use crate::product::{NwsProduct, ProductFamily, SegmentTag};
+    use crate::product::{
+        NwsProduct, ProductFamily, SegmentTag, WarningActionKind, WarningParsedTags,
+        WarningTextTagKind,
+    };
     use crate::wmo::WmoMessage;
 
     #[test]
@@ -550,5 +759,147 @@ mod tests {
         assert!(tags.contains(&SegmentTag::TornadoPossible));
         assert!(tags.contains(&SegmentTag::DamageThreat("CATASTROPHIC")));
         assert!(tags.contains(&SegmentTag::HailInches(0.75)));
+    }
+
+    #[test]
+    fn extracts_structured_tornado_warning_tags_and_action() {
+        let bulletin =
+            WmoMessage::parse_str(include_str!("../tests/fixtures/wmo_tornado_warning.txt"))
+                .unwrap();
+        let product = NwsProduct::parse(&bulletin).unwrap();
+        let tags = product.segments[0].warning_tags();
+
+        assert_eq!(tags.actions.len(), 1);
+        assert_eq!(tags.actions[0].action, "NEW");
+        assert_eq!(tags.actions[0].normalized_action, WarningActionKind::New);
+
+        let source = tags
+            .text_tags
+            .iter()
+            .find(|tag| tag.kind == WarningTextTagKind::Source)
+            .unwrap();
+        assert_eq!(source.raw_value, "Radar indicated rotation.");
+        assert_eq!(source.normalized_value, "RADAR INDICATED ROTATION.");
+
+        let tornado = tags
+            .text_tags
+            .iter()
+            .find(|tag| tag.kind == WarningTextTagKind::Tornado)
+            .unwrap();
+        assert_eq!(tornado.raw_name, "TORNADO");
+        assert_eq!(tornado.raw_value, "RADAR INDICATED");
+        assert_eq!(tornado.normalized_value, "RADAR INDICATED");
+
+        let hail = tags
+            .text_tags
+            .iter()
+            .find(|tag| tag.kind == WarningTextTagKind::MaxHailSize)
+            .unwrap();
+        assert_eq!(hail.raw_value, "1.00 IN");
+        assert_eq!(hail.normalized_value, "1.00 IN");
+        assert_eq!(hail.numeric_value, Some(1.0));
+        assert_eq!(hail.unit.as_deref(), Some("in"));
+    }
+
+    #[test]
+    fn extracts_structured_severe_thunderstorm_tags() {
+        let input = "123\nWUUS53 KDMX 010000\nSVRDMX\nIAC001-010100-\n/O.NEW.KDMX.SV.W.0001.240601T0000Z-240601T0100Z/\nHAIL THREAT...OBSERVED\nMAX HAIL SIZE...2.75 IN\nWIND THREAT...RADAR INDICATED\nMAX WIND GUST...80 MPH\nTSTM DAMAGE THREAT...DESTRUCTIVE\nSOURCE...Trained weather spotters.\nIMPACT...Expect considerable tree damage.\n";
+        let bulletin = WmoMessage::parse_str(input).unwrap();
+        let product = NwsProduct::parse(&bulletin).unwrap();
+        let tags = product.segments[0].warning_tags();
+        let kinds = tags
+            .text_tags
+            .iter()
+            .map(|tag| tag.kind)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            kinds,
+            vec![
+                WarningTextTagKind::HailThreat,
+                WarningTextTagKind::MaxHailSize,
+                WarningTextTagKind::WindThreat,
+                WarningTextTagKind::MaxWindGust,
+                WarningTextTagKind::TstmDamageThreat,
+                WarningTextTagKind::Source,
+                WarningTextTagKind::Impact,
+            ]
+        );
+        assert_eq!(tags.text_tags[1].numeric_value, Some(2.75));
+        assert_eq!(tags.text_tags[1].unit.as_deref(), Some("in"));
+        assert_eq!(tags.text_tags[3].numeric_value, Some(80.0));
+        assert_eq!(tags.text_tags[3].unit.as_deref(), Some("mph"));
+        assert_eq!(tags.text_tags[4].normalized_value, "DESTRUCTIVE");
+        assert_eq!(tags.actions[0].action, "NEW");
+    }
+
+    #[test]
+    fn extracts_structured_flash_flood_tags() {
+        let input = "123\nWGUS53 KDMX 010000\nFFWDMX\nIAC001-010100-\n/O.NEW.KDMX.FF.W.0003.240601T0000Z-240601T0100Z/\nFLASH FLOOD DAMAGE THREAT...CATASTROPHIC\nTHREAT...Life threatening flash flooding of creeks and streams.\nSOURCE...Radar indicated.\nIMPACT...This is a particularly dangerous situation.\n";
+        let bulletin = WmoMessage::parse_str(input).unwrap();
+        let product = NwsProduct::parse(&bulletin).unwrap();
+        let tags = product.segments[0].warning_tags();
+
+        assert_eq!(tags.text_tags.len(), 4);
+        assert_eq!(
+            tags.text_tags[0].kind,
+            WarningTextTagKind::FlashFloodDamageThreat
+        );
+        assert_eq!(tags.text_tags[0].normalized_value, "CATASTROPHIC");
+        assert_eq!(tags.text_tags[1].kind, WarningTextTagKind::Threat);
+        assert_eq!(
+            tags.text_tags[1].raw_value,
+            "Life threatening flash flooding of creeks and streams."
+        );
+    }
+
+    #[test]
+    fn structured_tag_extraction_ignores_missing_tags() {
+        let tags = WarningParsedTags::extract_text(&[
+            "Plain warning narrative without a dot tag.",
+            "HAZARD...60 mph wind gusts and quarter size hail.",
+        ]);
+
+        assert!(tags.text_tags.is_empty());
+        assert!(tags.actions.is_empty());
+    }
+
+    #[test]
+    fn structured_tag_extraction_preserves_multiple_tags_in_order() {
+        let tags = WarningParsedTags::extract_text(&[
+            "SOURCE...Radar indicated.",
+            "SOURCE...Public report.",
+            "IMPACT...First impact sentence.",
+            "IMPACT...Second impact sentence.",
+        ]);
+
+        assert_eq!(tags.text_tags.len(), 4);
+        assert_eq!(tags.text_tags[0].kind, WarningTextTagKind::Source);
+        assert_eq!(tags.text_tags[0].line_number, 1);
+        assert_eq!(tags.text_tags[1].raw_value, "Public report.");
+        assert_eq!(tags.text_tags[2].kind, WarningTextTagKind::Impact);
+        assert_eq!(tags.text_tags[3].line_number, 4);
+    }
+
+    #[test]
+    fn extracts_continuation_cancellation_and_expiration_actions() {
+        let input = "123\nWUUS53 KDMX 010000\nSVRDMX\nIAC001-010100-\n/O.CON.KDMX.TO.W.0001.000000T0000Z-240601T0100Z/\nTORNADO...POSSIBLE\n$$\nIAC003-010100-\n/O.CAN.KDMX.SV.W.0002.000000T0000Z-240601T0100Z/\nSOURCE...Radar indicated.\n$$\nIAC005-010100-\n/O.EXP.KDMX.FF.W.0003.000000T0000Z-240601T0100Z/\nFLASH FLOOD DAMAGE THREAT...CONSIDERABLE\n";
+        let bulletin = WmoMessage::parse_str(input).unwrap();
+        let product = NwsProduct::parse(&bulletin).unwrap();
+
+        let actions = product
+            .segments
+            .iter()
+            .map(|segment| segment.warning_tags().actions[0].normalized_action)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actions,
+            vec![
+                WarningActionKind::Continue,
+                WarningActionKind::Cancel,
+                WarningActionKind::Expire,
+            ]
+        );
     }
 }

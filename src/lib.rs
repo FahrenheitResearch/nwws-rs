@@ -46,7 +46,8 @@ pub use oi_client::{
 pub use pid201::{Pid201DrainState, Pid201Record, Pid201StreamAdapter};
 pub use product::{
     NwsProduct, NwwsContent, ProductFamily, ProductSegment, SegmentBoundaries, SegmentTag,
-    SegmentTags,
+    SegmentTags, WarningActionKind, WarningActionSource, WarningActionTag, WarningParsedTags,
+    WarningTextTag, WarningTextTagKind,
 };
 pub use replay::{
     ReplayInputKind, ReplayRecordSummary, ReplaySummary, collect_input_paths, infer_hint_from_path,

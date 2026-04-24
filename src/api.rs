@@ -14,7 +14,10 @@ use crate::ingest::{
     FramedStreamIngest, IngestHint, ParsedInput, TransportDescriptor, parse_with_hint,
 };
 use crate::oi::NwwsOiMessage;
-use crate::product::{NwwsContent, ProductFamily, ProductSegment, SegmentTag};
+use crate::product::{
+    NwwsContent, ProductFamily, ProductSegment, SegmentTag, WarningActionTag, WarningTextTag,
+    WarningTextTagKind,
+};
 use crate::runtime::semantic_fingerprint;
 use crate::ugc::{UgcCode, UgcKind, UgcString};
 use crate::vtec::{Phenomenon, Pvtec, Significance, VtecAction, VtecTime};
@@ -154,18 +157,52 @@ pub struct SegmentSummary {
     pub hail_inches: Option<f32>,
     pub wind_mph: Option<u16>,
     pub damage_threat: Option<String>,
+    pub text_tags: Vec<WarningTextTag>,
+    pub actions: Vec<WarningActionTag>,
     pub lat_lon: Option<Vec<PointSummary>>,
     pub time_mot_loc: Option<TimeMotLocSummary>,
 }
 
 impl SegmentSummary {
     fn from_segment(segment: &ProductSegment<'_>, office: &str) -> Self {
+        let parsed_tags = segment.warning_tags();
         let mut tornado_tag = None;
         let mut flash_flood_observed = false;
         let mut explicit_flash_flood_emergency = false;
         let mut hail_inches = None;
         let mut wind_mph = None;
         let mut raw_damage_threat = None;
+
+        for tag in &parsed_tags.text_tags {
+            match tag.kind {
+                WarningTextTagKind::Tornado => match tag.normalized_value.as_str() {
+                    "OBSERVED" => tornado_tag = Some("OBSERVED"),
+                    "RADAR INDICATED" => tornado_tag = Some("RADAR INDICATED"),
+                    "POSSIBLE" => tornado_tag = Some("POSSIBLE"),
+                    _ => {}
+                },
+                WarningTextTagKind::MaxHailSize => {
+                    if let Some(value) = tag.numeric_value {
+                        hail_inches = Some(round2(value));
+                    }
+                }
+                WarningTextTagKind::MaxWindGust => {
+                    if let Some(value) = tag.numeric_value {
+                        wind_mph = Some(value.round() as u16);
+                    }
+                }
+                WarningTextTagKind::FlashFloodDamageThreat
+                | WarningTextTagKind::TstmDamageThreat
+                | WarningTextTagKind::TornadoDamageThreat => {
+                    raw_damage_threat = Some(tag.normalized_value.clone());
+                }
+                WarningTextTagKind::HailThreat
+                | WarningTextTagKind::WindThreat
+                | WarningTextTagKind::Threat
+                | WarningTextTagKind::Source
+                | WarningTextTagKind::Impact => {}
+            }
+        }
 
         for tag in &segment.tags.tags {
             match tag {
@@ -219,6 +256,8 @@ impl SegmentSummary {
             hail_inches,
             wind_mph,
             damage_threat,
+            text_tags: parsed_tags.text_tags,
+            actions: parsed_tags.actions,
             lat_lon: segment.lat_lon.as_ref().map(|block| {
                 block
                     .points()
@@ -1670,6 +1709,7 @@ mod tests {
         split_pid201_bytes, write_pid201_split,
     };
     use crate::ingest::IngestHint;
+    use crate::product::WarningTextTagKind;
 
     #[test]
     fn inspect_bytes_returns_detailed_segment_data() {
@@ -1690,6 +1730,13 @@ mod tests {
             Some("RADAR INDICATED")
         );
         assert_eq!(report.messages[0].segments[0].ugcs.len(), 3);
+        assert!(
+            report.messages[0].segments[0]
+                .text_tags
+                .iter()
+                .any(|tag| tag.kind == WarningTextTagKind::Impact)
+        );
+        assert_eq!(report.messages[0].segments[0].actions[0].action, "NEW");
     }
 
     #[test]

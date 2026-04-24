@@ -11,7 +11,10 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use crate::api::ApiError;
 use crate::geo::GeoPoint;
 use crate::ingest::{IngestHint, ParsedInput, parse_with_hint};
-use crate::product::{NwwsContent, ProductFamily, ProductSegment, SegmentTag};
+use crate::product::{
+    NwwsContent, ProductFamily, ProductSegment, SegmentTag, WarningActionTag, WarningTextTag,
+    WarningTextTagKind,
+};
 use crate::ugc::{UgcCode, UgcKind, UgcString};
 use crate::vtec::{Phenomenon, Pvtec, Significance, VtecAction};
 
@@ -81,16 +84,45 @@ pub struct WarningTags {
     pub hail_inches: Option<f32>,
     pub wind_mph: Option<u16>,
     pub damage_threat: Option<String>,
+    pub text_tags: Vec<WarningTextTag>,
+    pub actions: Vec<WarningActionTag>,
 }
 
 impl WarningTags {
     fn from_segment(segment: &ProductSegment<'_>) -> Self {
+        let parsed_tags = segment.warning_tags();
         let mut tornado = None;
         let mut flash_flood_observed = false;
         let mut explicit_flash_flood_emergency = false;
         let mut hail_inches = None;
         let mut wind_mph = None;
         let mut raw_damage_threat = None;
+
+        for tag in &parsed_tags.text_tags {
+            match tag.kind {
+                WarningTextTagKind::Tornado => tornado = Some(tag.normalized_value.clone()),
+                WarningTextTagKind::MaxHailSize => {
+                    if let Some(value) = tag.numeric_value {
+                        hail_inches = Some(round2(value));
+                    }
+                }
+                WarningTextTagKind::MaxWindGust => {
+                    if let Some(value) = tag.numeric_value {
+                        wind_mph = Some(value.round() as u16);
+                    }
+                }
+                WarningTextTagKind::FlashFloodDamageThreat
+                | WarningTextTagKind::TstmDamageThreat
+                | WarningTextTagKind::TornadoDamageThreat => {
+                    raw_damage_threat = Some(tag.normalized_value.clone());
+                }
+                WarningTextTagKind::HailThreat
+                | WarningTextTagKind::WindThreat
+                | WarningTextTagKind::Threat
+                | WarningTextTagKind::Source
+                | WarningTextTagKind::Impact => {}
+            }
+        }
 
         for tag in &segment.tags.tags {
             match tag {
@@ -124,6 +156,8 @@ impl WarningTags {
             hail_inches,
             wind_mph,
             damage_threat,
+            text_tags: parsed_tags.text_tags,
+            actions: parsed_tags.actions,
         }
     }
 }
@@ -873,6 +907,7 @@ mod tests {
 
     use super::{WarningLifecycleStatus, polygon_timeline_at};
     use crate::ingest::IngestHint;
+    use crate::product::{WarningActionKind, WarningTextTagKind};
 
     #[test]
     fn polygon_timeline_at_returns_versioned_warning_records() {
@@ -927,6 +962,19 @@ mod tests {
             tornado_records[0].tags.tornado.as_deref(),
             Some("RADAR INDICATED")
         );
+        assert!(
+            tornado_records[0]
+                .tags
+                .text_tags
+                .iter()
+                .any(|tag| tag.kind == WarningTextTagKind::Source
+                    && tag.raw_value == "Radar indicated rotation.")
+        );
+        assert_eq!(tornado_records[0].tags.actions[0].action, "NEW");
+        assert_eq!(
+            tornado_records[0].tags.actions[0].normalized_action,
+            WarningActionKind::New
+        );
         let polygon = tornado_records[0].polygon.as_ref().unwrap();
         assert!(polygon.raw.starts_with("LAT...LON"));
         assert_eq!(polygon.points.len(), 6);
@@ -943,6 +991,11 @@ mod tests {
             Some("2026-04-21T16:20:00Z")
         );
         assert_eq!(tornado_records[1].valid_start, None);
+        assert_eq!(tornado_records[1].tags.actions[0].action, "CON");
+        assert_eq!(
+            tornado_records[1].tags.actions[0].normalized_action,
+            WarningActionKind::Continue
+        );
 
         let severe = report
             .records
