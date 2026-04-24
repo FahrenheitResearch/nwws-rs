@@ -221,6 +221,45 @@ pub struct WarningTimelineReport {
     pub errors: Vec<WarningTimelineFailure>,
 }
 
+pub const AREA_TIME_POLYGON_METRICS_SCHEMA: &str = "warning.area_time_polygon_metrics.v1";
+pub const AREA_TIME_POLYGON_METRICS_METHOD: &str = "planar-lon-lat-shoelace-convex-clip-v1";
+
+const AREA_TIME_POLYGON_METRICS_LIMITATIONS: &[&str] = &[
+    "Polygon area is computed in lon/lat square-degrees; it is not geodesic or equal-area.",
+    "Polygon overlap uses deterministic planar clipping and is returned only for simple convex polygons.",
+    "Dateline, pole, and earth-curvature effects are not modeled.",
+];
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WarningAreaTimePolygonMetrics {
+    pub schema: &'static str,
+    pub method: &'static str,
+    pub limitations: Vec<&'static str>,
+    pub left_record_key: String,
+    pub right_record_key: String,
+    pub left_event_id: String,
+    pub right_event_id: String,
+    pub left_interval_start: Option<String>,
+    pub left_interval_end: Option<String>,
+    pub right_interval_start: Option<String>,
+    pub right_interval_end: Option<String>,
+    pub left_duration_seconds: Option<i64>,
+    pub right_duration_seconds: Option<i64>,
+    pub time_overlap_seconds: Option<i64>,
+    pub time_union_seconds: Option<i64>,
+    pub time_overlap_ratio: Option<f64>,
+    pub left_area_square_degrees: Option<f64>,
+    pub right_area_square_degrees: Option<f64>,
+    pub polygon_overlap_area_square_degrees: Option<f64>,
+    pub polygon_union_area_square_degrees: Option<f64>,
+    pub polygon_overlap_ratio: Option<f64>,
+    pub left_area_time_square_degree_seconds: Option<f64>,
+    pub right_area_time_square_degree_seconds: Option<f64>,
+    pub overlap_area_time_square_degree_seconds: Option<f64>,
+    pub union_area_time_square_degree_seconds: Option<f64>,
+    pub area_time_overlap_ratio: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct TimelineSortKey {
     issued_at: Option<PrimitiveDateTime>,
@@ -250,6 +289,18 @@ struct MessageContext {
     query_time: Option<PrimitiveDateTime>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WarningInterval {
+    start: PrimitiveDateTime,
+    end: PrimitiveDateTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlanarPoint {
+    x: f64,
+    y: f64,
+}
+
 pub fn polygon_timeline(
     path: impl AsRef<Path>,
     hint_override: Option<IngestHint>,
@@ -276,6 +327,139 @@ pub fn polygon_timeline_at_time(
         Some(query_time_utc.to_offset(UtcOffset::UTC)),
         hint_override,
     )
+}
+
+pub fn area_time_polygon_metrics(
+    left: &WarningTimelineRecord,
+    right: &WarningTimelineRecord,
+) -> WarningAreaTimePolygonMetrics {
+    let left_interval = warning_interval(left);
+    let right_interval = warning_interval(right);
+    let left_duration_seconds = left_interval.map(|interval| interval.duration_seconds());
+    let right_duration_seconds = right_interval.map(|interval| interval.duration_seconds());
+    let time_overlap_seconds =
+        left_interval.and_then(|left| right_interval.map(|right| left.overlap_seconds(right)));
+    let time_union_seconds = left_duration_seconds.and_then(|left_duration| {
+        right_duration_seconds.and_then(|right_duration| {
+            time_overlap_seconds.map(|overlap| left_duration + right_duration - overlap)
+        })
+    });
+
+    let left_area_square_degrees = left
+        .polygon
+        .as_ref()
+        .and_then(warning_polygon_area_square_degrees);
+    let right_area_square_degrees = right
+        .polygon
+        .as_ref()
+        .and_then(warning_polygon_area_square_degrees);
+    let polygon_overlap_area_square_degrees = left.polygon.as_ref().and_then(|left_polygon| {
+        right.polygon.as_ref().and_then(|right_polygon| {
+            warning_polygon_overlap_area_square_degrees(left_polygon, right_polygon)
+        })
+    });
+    let polygon_union_area_square_degrees = left_area_square_degrees.and_then(|left_area| {
+        right_area_square_degrees.and_then(|right_area| {
+            polygon_overlap_area_square_degrees
+                .map(|overlap_area| nonnegative(left_area + right_area - overlap_area))
+        })
+    });
+
+    let left_area_time_square_degree_seconds =
+        area_time(left_area_square_degrees, left_duration_seconds);
+    let right_area_time_square_degree_seconds =
+        area_time(right_area_square_degrees, right_duration_seconds);
+    let overlap_area_time_square_degree_seconds =
+        area_time(polygon_overlap_area_square_degrees, time_overlap_seconds);
+    let union_area_time_square_degree_seconds =
+        left_area_time_square_degree_seconds.and_then(|left_area_time| {
+            right_area_time_square_degree_seconds.and_then(|right_area_time| {
+                overlap_area_time_square_degree_seconds.map(|overlap_area_time| {
+                    nonnegative(left_area_time + right_area_time - overlap_area_time)
+                })
+            })
+        });
+
+    WarningAreaTimePolygonMetrics {
+        schema: AREA_TIME_POLYGON_METRICS_SCHEMA,
+        method: AREA_TIME_POLYGON_METRICS_METHOD,
+        limitations: area_time_polygon_metric_limitations().to_vec(),
+        left_record_key: left.record_key.clone(),
+        right_record_key: right.record_key.clone(),
+        left_event_id: left.event_id.clone(),
+        right_event_id: right.event_id.clone(),
+        left_interval_start: left_interval.map(|interval| format_primitive_utc(interval.start)),
+        left_interval_end: left_interval.map(|interval| format_primitive_utc(interval.end)),
+        right_interval_start: right_interval.map(|interval| format_primitive_utc(interval.start)),
+        right_interval_end: right_interval.map(|interval| format_primitive_utc(interval.end)),
+        left_duration_seconds,
+        right_duration_seconds,
+        time_overlap_seconds,
+        time_union_seconds,
+        time_overlap_ratio: ratio_i64(time_overlap_seconds, time_union_seconds),
+        left_area_square_degrees,
+        right_area_square_degrees,
+        polygon_overlap_area_square_degrees,
+        polygon_union_area_square_degrees,
+        polygon_overlap_ratio: ratio_f64(
+            polygon_overlap_area_square_degrees,
+            polygon_union_area_square_degrees,
+        ),
+        left_area_time_square_degree_seconds,
+        right_area_time_square_degree_seconds,
+        overlap_area_time_square_degree_seconds,
+        union_area_time_square_degree_seconds,
+        area_time_overlap_ratio: ratio_f64(
+            overlap_area_time_square_degree_seconds,
+            union_area_time_square_degree_seconds,
+        ),
+    }
+}
+
+pub fn area_time_polygon_metric_limitations() -> &'static [&'static str] {
+    AREA_TIME_POLYGON_METRICS_LIMITATIONS
+}
+
+pub fn warning_interval_duration_seconds(record: &WarningTimelineRecord) -> Option<i64> {
+    warning_interval(record).map(|interval| interval.duration_seconds())
+}
+
+pub fn warning_interval_overlap_seconds(
+    left: &WarningTimelineRecord,
+    right: &WarningTimelineRecord,
+) -> Option<i64> {
+    warning_interval(left)
+        .and_then(|left| warning_interval(right).map(|right| left.overlap_seconds(right)))
+}
+
+pub fn warning_polygon_area_square_degrees(polygon: &WarningPolygon) -> Option<f64> {
+    let points = normalized_planar_points(&polygon.points)?;
+    if polygon_self_intersects(&points) {
+        return None;
+    }
+
+    Some(shoelace_area(&points))
+}
+
+pub fn warning_polygon_overlap_area_square_degrees(
+    left: &WarningPolygon,
+    right: &WarningPolygon,
+) -> Option<f64> {
+    let left_points = normalized_planar_points(&left.points)?;
+    let right_points = normalized_planar_points(&right.points)?;
+    if polygon_self_intersects(&left_points) || polygon_self_intersects(&right_points) {
+        return None;
+    }
+    if !is_convex_polygon(&left_points) || !is_convex_polygon(&right_points) {
+        return None;
+    }
+
+    let clipped = clip_polygon(&left_points, &right_points);
+    if clipped.len() < 3 {
+        return Some(0.0);
+    }
+
+    Some(shoelace_area(&clipped))
 }
 
 fn polygon_timeline_impl(
@@ -638,6 +822,333 @@ fn latest_record_status(
     WarningLifecycleStatus::Active
 }
 
+impl WarningInterval {
+    fn duration_seconds(self) -> i64 {
+        (self.end - self.start).whole_seconds()
+    }
+
+    fn overlap_seconds(self, other: Self) -> i64 {
+        let start = if self.start >= other.start {
+            self.start
+        } else {
+            other.start
+        };
+        let end = if self.end <= other.end {
+            self.end
+        } else {
+            other.end
+        };
+
+        if end <= start {
+            0
+        } else {
+            (end - start).whole_seconds()
+        }
+    }
+}
+
+const PLANAR_EPSILON: f64 = 1.0e-9;
+
+fn warning_interval(record: &WarningTimelineRecord) -> Option<WarningInterval> {
+    let start = parse_record_utc(record.valid_start.as_deref())
+        .or_else(|| parse_record_utc(record.issued_at.as_deref()))
+        .or_else(|| parse_record_utc(record.wrapper_issued_at.as_deref()))?;
+    let valid_end = parse_record_utc(record.valid_end.as_deref())
+        .or_else(|| parse_record_utc(record.expires_at.as_deref()));
+    let canceled_at = parse_record_utc(record.canceled_at.as_deref());
+    let end = match (valid_end, canceled_at) {
+        (Some(valid_end), Some(canceled_at)) if canceled_at < valid_end => canceled_at,
+        (Some(valid_end), _) => valid_end,
+        (None, Some(canceled_at)) => canceled_at,
+        (None, None) => return None,
+    };
+
+    (end > start).then_some(WarningInterval { start, end })
+}
+
+fn parse_record_utc(raw: Option<&str>) -> Option<PrimitiveDateTime> {
+    raw.and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+        .map(primitive_utc)
+}
+
+fn area_time(area: Option<f64>, duration_seconds: Option<i64>) -> Option<f64> {
+    area.and_then(|area| duration_seconds.map(|duration| area * duration as f64))
+}
+
+fn ratio_i64(numerator: Option<i64>, denominator: Option<i64>) -> Option<f64> {
+    numerator
+        .and_then(|numerator| denominator.map(|denominator| (numerator, denominator)))
+        .and_then(|(numerator, denominator)| {
+            (denominator > 0).then_some((numerator as f64 / denominator as f64).clamp(0.0, 1.0))
+        })
+}
+
+fn ratio_f64(numerator: Option<f64>, denominator: Option<f64>) -> Option<f64> {
+    numerator
+        .and_then(|numerator| denominator.map(|denominator| (numerator, denominator)))
+        .and_then(|(numerator, denominator)| {
+            (denominator > PLANAR_EPSILON).then_some((numerator / denominator).clamp(0.0, 1.0))
+        })
+}
+
+fn nonnegative(value: f64) -> f64 {
+    if value.abs() <= PLANAR_EPSILON {
+        0.0
+    } else {
+        value.max(0.0)
+    }
+}
+
+fn normalized_planar_points(points: &[WarningPoint]) -> Option<Vec<PlanarPoint>> {
+    let mut normalized = Vec::with_capacity(points.len());
+    for point in points {
+        let planar = PlanarPoint {
+            x: f64::from(point.lon),
+            y: f64::from(point.lat),
+        };
+        if !planar.x.is_finite() || !planar.y.is_finite() {
+            return None;
+        }
+        if normalized
+            .last()
+            .is_none_or(|previous| !points_equal(*previous, planar))
+        {
+            normalized.push(planar);
+        }
+    }
+
+    if normalized.len() > 1
+        && points_equal(
+            *normalized.first().expect("checked non-empty"),
+            *normalized.last().expect("checked non-empty"),
+        )
+    {
+        normalized.pop();
+    }
+
+    (normalized.len() >= 3).then_some(normalized)
+}
+
+fn polygon_self_intersects(points: &[PlanarPoint]) -> bool {
+    for first in 0..points.len() {
+        let first_next = (first + 1) % points.len();
+        for second in (first + 1)..points.len() {
+            let second_next = (second + 1) % points.len();
+            if first == second
+                || first_next == second
+                || second_next == first
+                || (first == 0 && second_next == 0)
+            {
+                continue;
+            }
+            if segments_intersect(
+                points[first],
+                points[first_next],
+                points[second],
+                points[second_next],
+            ) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn segments_intersect(
+    first_start: PlanarPoint,
+    first_end: PlanarPoint,
+    second_start: PlanarPoint,
+    second_end: PlanarPoint,
+) -> bool {
+    let first_second_start = cross(first_start, first_end, second_start);
+    let first_second_end = cross(first_start, first_end, second_end);
+    let second_first_start = cross(second_start, second_end, first_start);
+    let second_first_end = cross(second_start, second_end, first_end);
+
+    if ((first_second_start > PLANAR_EPSILON && first_second_end < -PLANAR_EPSILON)
+        || (first_second_start < -PLANAR_EPSILON && first_second_end > PLANAR_EPSILON))
+        && ((second_first_start > PLANAR_EPSILON && second_first_end < -PLANAR_EPSILON)
+            || (second_first_start < -PLANAR_EPSILON && second_first_end > PLANAR_EPSILON))
+    {
+        return true;
+    }
+
+    (first_second_start.abs() <= PLANAR_EPSILON && on_segment(first_start, second_start, first_end))
+        || (first_second_end.abs() <= PLANAR_EPSILON
+            && on_segment(first_start, second_end, first_end))
+        || (second_first_start.abs() <= PLANAR_EPSILON
+            && on_segment(second_start, first_start, second_end))
+        || (second_first_end.abs() <= PLANAR_EPSILON
+            && on_segment(second_start, first_end, second_end))
+}
+
+fn on_segment(start: PlanarPoint, point: PlanarPoint, end: PlanarPoint) -> bool {
+    point.x >= start.x.min(end.x) - PLANAR_EPSILON
+        && point.x <= start.x.max(end.x) + PLANAR_EPSILON
+        && point.y >= start.y.min(end.y) - PLANAR_EPSILON
+        && point.y <= start.y.max(end.y) + PLANAR_EPSILON
+}
+
+fn is_convex_polygon(points: &[PlanarPoint]) -> bool {
+    let mut sign = 0.0f64;
+
+    for index in 0..points.len() {
+        let turn = cross(
+            points[index],
+            points[(index + 1) % points.len()],
+            points[(index + 2) % points.len()],
+        );
+        if turn.abs() <= PLANAR_EPSILON {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = turn.signum();
+        } else if sign * turn < -PLANAR_EPSILON {
+            return false;
+        }
+    }
+
+    sign != 0.0
+}
+
+fn clip_polygon(subject: &[PlanarPoint], clip: &[PlanarPoint]) -> Vec<PlanarPoint> {
+    let mut output = subject.to_vec();
+    let clip_is_counter_clockwise = signed_area(clip) >= 0.0;
+
+    for index in 0..clip.len() {
+        if output.is_empty() {
+            break;
+        }
+
+        let edge_start = clip[index];
+        let edge_end = clip[(index + 1) % clip.len()];
+        let input = output;
+        output = Vec::new();
+        let mut previous = *input.last().expect("checked non-empty");
+        let mut previous_inside =
+            inside_clip_edge(previous, edge_start, edge_end, clip_is_counter_clockwise);
+
+        for current in input {
+            let current_inside =
+                inside_clip_edge(current, edge_start, edge_end, clip_is_counter_clockwise);
+            if current_inside {
+                if !previous_inside
+                    && let Some(intersection) =
+                        line_intersection(previous, current, edge_start, edge_end)
+                {
+                    output.push(intersection);
+                }
+                output.push(current);
+            } else if previous_inside
+                && let Some(intersection) =
+                    line_intersection(previous, current, edge_start, edge_end)
+            {
+                output.push(intersection);
+            }
+
+            previous = current;
+            previous_inside = current_inside;
+        }
+
+        output = dedupe_planar_points(output);
+    }
+
+    output
+}
+
+fn inside_clip_edge(
+    point: PlanarPoint,
+    edge_start: PlanarPoint,
+    edge_end: PlanarPoint,
+    clip_is_counter_clockwise: bool,
+) -> bool {
+    let side = cross(edge_start, edge_end, point);
+    if clip_is_counter_clockwise {
+        side >= -PLANAR_EPSILON
+    } else {
+        side <= PLANAR_EPSILON
+    }
+}
+
+fn line_intersection(
+    segment_start: PlanarPoint,
+    segment_end: PlanarPoint,
+    edge_start: PlanarPoint,
+    edge_end: PlanarPoint,
+) -> Option<PlanarPoint> {
+    let segment = subtract(segment_end, segment_start);
+    let edge = subtract(edge_end, edge_start);
+    let denominator = cross_vectors(segment, edge);
+    if denominator.abs() <= PLANAR_EPSILON {
+        return None;
+    }
+
+    let offset = subtract(edge_start, segment_start);
+    let scale = cross_vectors(offset, edge) / denominator;
+    Some(PlanarPoint {
+        x: segment_start.x + scale * segment.x,
+        y: segment_start.y + scale * segment.y,
+    })
+}
+
+fn dedupe_planar_points(points: Vec<PlanarPoint>) -> Vec<PlanarPoint> {
+    let mut deduped = Vec::with_capacity(points.len());
+    for point in points {
+        if deduped
+            .last()
+            .is_none_or(|previous| !points_equal(*previous, point))
+        {
+            deduped.push(point);
+        }
+    }
+
+    if deduped.len() > 1
+        && points_equal(
+            *deduped.first().expect("checked non-empty"),
+            *deduped.last().expect("checked non-empty"),
+        )
+    {
+        deduped.pop();
+    }
+
+    deduped
+}
+
+fn shoelace_area(points: &[PlanarPoint]) -> f64 {
+    signed_area(points).abs()
+}
+
+fn signed_area(points: &[PlanarPoint]) -> f64 {
+    let mut sum = 0.0;
+    for index in 0..points.len() {
+        let current = points[index];
+        let next = points[(index + 1) % points.len()];
+        sum += current.x * next.y - next.x * current.y;
+    }
+
+    sum / 2.0
+}
+
+fn cross(start: PlanarPoint, end: PlanarPoint, point: PlanarPoint) -> f64 {
+    cross_vectors(subtract(end, start), subtract(point, start))
+}
+
+fn cross_vectors(left: PlanarPoint, right: PlanarPoint) -> f64 {
+    left.x * right.y - left.y * right.x
+}
+
+fn subtract(left: PlanarPoint, right: PlanarPoint) -> PlanarPoint {
+    PlanarPoint {
+        x: left.x - right.x,
+        y: left.y - right.y,
+    }
+}
+
+fn points_equal(left: PlanarPoint, right: PlanarPoint) -> bool {
+    (left.x - right.x).abs() <= PLANAR_EPSILON && (left.y - right.y).abs() <= PLANAR_EPSILON
+}
+
 fn issue_time_for_record(
     yygggg: &str,
     wrapper_issue: Option<OffsetDateTime>,
@@ -905,9 +1416,121 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{WarningLifecycleStatus, polygon_timeline_at};
+    use super::{
+        WarningLifecycleStatus, WarningPoint, WarningPolygon, WarningTags, WarningTimelineRecord,
+        area_time_polygon_metrics, polygon_timeline_at, warning_interval_overlap_seconds,
+        warning_polygon_area_square_degrees, warning_polygon_overlap_area_square_degrees,
+    };
     use crate::ingest::IngestHint;
     use crate::product::{WarningActionKind, WarningTextTagKind};
+
+    #[test]
+    fn area_time_polygon_metrics_returns_deterministic_pair_values() {
+        let left = test_record(
+            "left",
+            "KAAA.O.TO.W.0001",
+            "2026-04-21T16:00:00Z",
+            "2026-04-21T17:00:00Z",
+            square_polygon(0.0, 0.0, 2.0, 2.0),
+        );
+        let right = test_record(
+            "right",
+            "KAAA.O.TO.W.0002",
+            "2026-04-21T16:30:00Z",
+            "2026-04-21T17:30:00Z",
+            square_polygon(1.0, 1.0, 3.0, 3.0),
+        );
+
+        let metrics = area_time_polygon_metrics(&left, &right);
+
+        assert_eq!(metrics.schema, "warning.area_time_polygon_metrics.v1");
+        assert_eq!(metrics.method, "planar-lon-lat-shoelace-convex-clip-v1");
+        assert!(
+            metrics
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("square-degrees"))
+        );
+        assert_eq!(metrics.left_duration_seconds, Some(3600));
+        assert_eq!(metrics.right_duration_seconds, Some(3600));
+        assert_eq!(metrics.time_overlap_seconds, Some(1800));
+        assert_eq!(metrics.time_union_seconds, Some(5400));
+        assert_approx(metrics.time_overlap_ratio.unwrap(), 1.0 / 3.0);
+        assert_approx(metrics.left_area_square_degrees.unwrap(), 4.0);
+        assert_approx(metrics.right_area_square_degrees.unwrap(), 4.0);
+        assert_approx(metrics.polygon_overlap_area_square_degrees.unwrap(), 1.0);
+        assert_approx(metrics.polygon_union_area_square_degrees.unwrap(), 7.0);
+        assert_approx(metrics.polygon_overlap_ratio.unwrap(), 1.0 / 7.0);
+        assert_approx(
+            metrics.left_area_time_square_degree_seconds.unwrap(),
+            14_400.0,
+        );
+        assert_approx(
+            metrics.right_area_time_square_degree_seconds.unwrap(),
+            14_400.0,
+        );
+        assert_approx(
+            metrics.overlap_area_time_square_degree_seconds.unwrap(),
+            1_800.0,
+        );
+        assert_approx(
+            metrics.union_area_time_square_degree_seconds.unwrap(),
+            27_000.0,
+        );
+        assert_approx(metrics.area_time_overlap_ratio.unwrap(), 1.0 / 15.0);
+    }
+
+    #[test]
+    fn area_time_polygon_helpers_use_parsed_timeline_records() {
+        let root = temp_dir_path("nwws_rs_warning_area_time_metrics");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("warning.txt"),
+            include_str!("../tests/fixtures/wmo_tornado_warning.txt"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("svs.txt"),
+            include_str!("../tests/fixtures/wmo_segmented_svs.txt"),
+        )
+        .unwrap();
+
+        let report =
+            polygon_timeline_at(&root, "2026-04-21T16:25:00Z", Some(IngestHint::RawBulletin))
+                .unwrap();
+        let tornado_records = report
+            .records
+            .iter()
+            .filter(|record| record.event_id == "KLOT.O.TO.W.0001")
+            .collect::<Vec<_>>();
+        let metrics = area_time_polygon_metrics(tornado_records[0], tornado_records[1]);
+
+        assert_eq!(metrics.left_duration_seconds, Some(1800));
+        assert_eq!(metrics.right_duration_seconds, Some(600));
+        assert_eq!(
+            warning_interval_overlap_seconds(tornado_records[0], tornado_records[1]),
+            Some(600)
+        );
+        assert_eq!(metrics.time_overlap_seconds, Some(600));
+        assert!(metrics.left_area_square_degrees.unwrap() > 0.0);
+        assert!(metrics.right_area_square_degrees.unwrap() > 0.0);
+        assert!(metrics.left_area_time_square_degree_seconds.unwrap() > 0.0);
+        assert!(metrics.right_area_time_square_degree_seconds.unwrap() > 0.0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn polygon_overlap_skips_self_intersecting_shapes() {
+        let bowtie = polygon(&[(0.0, 0.0), (2.0, 2.0), (0.0, 2.0), (2.0, 0.0)]);
+        let square = square_polygon(0.0, 0.0, 3.0, 3.0);
+
+        assert_eq!(warning_polygon_area_square_degrees(&bowtie), None);
+        assert_eq!(
+            warning_polygon_overlap_area_square_degrees(&bowtie, &square),
+            None
+        );
+    }
 
     #[test]
     fn polygon_timeline_at_returns_versioned_warning_records() {
@@ -1086,5 +1709,90 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}_{unique}"))
+    }
+
+    fn test_record(
+        record_key: &str,
+        event_id: &str,
+        valid_start: &str,
+        valid_end: &str,
+        polygon: WarningPolygon,
+    ) -> WarningTimelineRecord {
+        WarningTimelineRecord {
+            record_key: record_key.to_owned(),
+            event_id: event_id.to_owned(),
+            source_path: PathBuf::from("test.txt"),
+            byte_range: None,
+            message_index: 1,
+            segment_index: 1,
+            vtec_index: 1,
+            heading: "WUUS53 KAAA 211600".to_owned(),
+            issued_at: Some(valid_start.to_owned()),
+            wrapper_id: None,
+            wrapper_issued_at: None,
+            office: "KAAA".to_owned(),
+            message_office: "KAAA".to_owned(),
+            awips_id: Some("TORAAA".to_owned()),
+            product_family: "tornado".to_owned(),
+            event_family: "tornado".to_owned(),
+            event_class: "O".to_owned(),
+            action: "NEW".to_owned(),
+            phenomenon: "TO".to_owned(),
+            significance: "W".to_owned(),
+            event_tracking_number: 1,
+            valid_start: Some(valid_start.to_owned()),
+            valid_end: Some(valid_end.to_owned()),
+            expires_at: Some(valid_end.to_owned()),
+            canceled_at: None,
+            updated_at: None,
+            lifecycle_status: None,
+            vtec: "/O.NEW.KAAA.TO.W.0001.260421T1600Z-260421T1700Z/".to_owned(),
+            ugc_raw: "AAC001-211700-".to_owned(),
+            ugc_purge_time: "211700".to_owned(),
+            ugcs: vec!["AAC001".to_owned()],
+            headline: None,
+            tags: WarningTags {
+                tornado: None,
+                flash_flood_observed: false,
+                flash_flood_emergency: false,
+                hail_inches: None,
+                wind_mph: None,
+                damage_threat: None,
+                text_tags: Vec::new(),
+                actions: Vec::new(),
+            },
+            polygon: Some(polygon),
+            time_mot_loc: None,
+            raw_bulletin_blake3: "test".to_owned(),
+        }
+    }
+
+    fn square_polygon(min_lat: f32, min_lon: f32, max_lat: f32, max_lon: f32) -> WarningPolygon {
+        polygon(&[
+            (min_lat, min_lon),
+            (min_lat, max_lon),
+            (max_lat, max_lon),
+            (max_lat, min_lon),
+        ])
+    }
+
+    fn polygon(points: &[(f32, f32)]) -> WarningPolygon {
+        WarningPolygon {
+            raw: "LAT...LON test".to_owned(),
+            points: points
+                .iter()
+                .map(|(lat, lon)| WarningPoint {
+                    lat: *lat,
+                    lon: *lon,
+                })
+                .collect(),
+        }
+    }
+
+    fn assert_approx(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-9,
+            "expected {actual} to be within tolerance of {expected}"
+        );
     }
 }
