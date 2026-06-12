@@ -1,7 +1,8 @@
 # Static musl build; the final image is the bare binary on scratch (~10 MB).
 # rustls + webpki-roots means no OpenSSL and no CA-certificates package needed.
 FROM rust:1-alpine AS build
-RUN apk add --no-cache musl-dev
+# build-base provides gcc for the C in ring and blake3
+RUN apk add --no-cache build-base
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
