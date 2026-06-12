@@ -2,10 +2,14 @@
 name = "nwws-rs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-description = "High-performance parsers for NOAA Weather Wire Service bulletins and NWWS-OI XMPP stanzas"
+description = "High-performance parsers, ingest daemon, and self-hosted HTTP API for NOAA Weather Wire Service (NWWS-OI) text products"
+repository = "https://github.com/FahrenheitResearch/nwws-rs"
+readme = "README.md"
 keywords = ["weather", "nwws", "noaa", "xmpp", "wmo"]
 categories = ["parser-implementations", "science"]
+exclude = ["/fuzz", "/python-tests", "/tools", "/.github", "/deploy"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -13,8 +17,10 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 python = ["dep:pyo3"]
+serve = ["dep:axum", "dep:tokio", "dep:tokio-stream", "dep:tower-http"]
 
 [dependencies]
+axum = { version = "0.8", optional = true }
 base64 = "0.22"
 blake3 = "1.8"
 memchr = "2.7"
@@ -24,11 +30,16 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 time = { version = "0.3", features = ["formatting", "parsing"] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", optional = true, features = ["sync"] }
+tower-http = { version = "0.6", optional = true, features = ["cors"] }
 webpki-roots = "1.0"
 
 [dev-dependencies]
 criterion = { version = "0.6", default-features = false }
+http-body-util = "0.1"
 proptest = "1.9"
+tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
 name = "parse"

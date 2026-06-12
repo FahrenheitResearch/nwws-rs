@@ -658,6 +658,19 @@ pub fn active_warnings_at_time(
         resolve_scan_root(path)
     };
     let files = collect_inputs(path)?;
+    active_warnings_in_files(root, files, reference_utc, hint_override)
+}
+
+/// [`active_warnings_at_time`] over a caller-assembled file list, for callers
+/// that scope scans themselves (for example to a date window inside a large
+/// archive). VTEC state collapses across the whole list, so the list must
+/// contain every message of each event's lifecycle the caller wants resolved.
+pub fn active_warnings_in_files(
+    root: PathBuf,
+    files: Vec<PathBuf>,
+    reference_utc: OffsetDateTime,
+    hint_override: Option<IngestHint>,
+) -> Result<ActiveWarningReport> {
     let reference_utc = reference_utc.to_offset(UtcOffset::UTC);
     let reference = primitive_utc(reference_utc);
     let reference_text = format_primitive_utc(reference);

@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorKind, ParseError, Result};
 use crate::geo::{LatLonBlock, TimeMotLoc};
@@ -8,7 +8,7 @@ use crate::ugc::UgcString;
 use crate::vtec::{Hvtec, Phenomenon, Pvtec, VtecAction};
 use crate::wmo::WmoMessage;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProductFamily {
     Tornado,
     SevereThunderstorm,

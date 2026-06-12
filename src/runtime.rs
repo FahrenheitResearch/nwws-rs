@@ -503,7 +503,9 @@ fn source_slug(source: RecordSource) -> &'static str {
     }
 }
 
-fn family_slug(family: ProductFamily) -> &'static str {
+/// Stable lowercase directory/query slug for a product family; these values
+/// name the family level of the archive directory layout.
+pub fn family_slug(family: ProductFamily) -> &'static str {
     match family {
         ProductFamily::Tornado => "tornado",
         ProductFamily::SevereThunderstorm => "severe_thunderstorm",

@@ -13,6 +13,8 @@ pub mod pid201;
 pub mod product;
 pub mod replay;
 pub mod runtime;
+#[cfg(feature = "serve")]
+pub mod serve;
 pub mod stream;
 pub mod ugc;
 pub mod vtec;
@@ -28,9 +30,9 @@ pub use api::{
     InputKind, InspectionReport, MessageSummary, Pid201SplitRecord, Pid201SplitReport,
     Pid201WriteRecord, Pid201WriteReport, PointSummary, Result as ApiResult, ScanCount,
     ScanFileResult, ScanReport, SegmentSummary, TimeMotLocSummary, TransportSummary,
-    WrapperSummary, active_warnings_at, active_warnings_at_time, archive_import, archive_verify,
-    inspect_bytes, inspect_oi_message, inspect_path, inspect_text, scan_path, split_pid201_bytes,
-    split_pid201_path, to_json, write_pid201_split,
+    WrapperSummary, active_warnings_at, active_warnings_at_time, active_warnings_in_files,
+    archive_import, archive_verify, inspect_bytes, inspect_oi_message, inspect_path, inspect_text,
+    scan_path, split_pid201_bytes, split_pid201_path, to_json, write_pid201_split,
 };
 pub use daemon::{
     BackoffPolicy, DaemonEvent, DaemonOptions, DaemonSummary, OiMessageSource,
@@ -60,7 +62,7 @@ pub use replay::{
 };
 pub use runtime::{
     ArchiveRecord, ArchiveStore, ArchivedMetadata, DedupeStore, IngestService, MessageRouter,
-    Pid201IngestSession, ProcessReport, RecordSource, Route, RouteRule, RuntimeError,
+    Pid201IngestSession, ProcessReport, RecordSource, Route, RouteRule, RuntimeError, family_slug,
     semantic_fingerprint,
 };
 pub use stream::{FramedChunk, FramedMessageIter, ScanOutcome, WmoStreamScanner};
@@ -74,7 +76,7 @@ pub use warning::{
     WarningTimelineFailure, WarningTimelineRecord, WarningTimelineReport,
     area_time_polygon_metric_limitations, area_time_polygon_metrics,
     lead_time_event_metric_limitations, lead_time_event_metrics, lead_time_event_metrics_at_time,
-    polygon_timeline, polygon_timeline_at, polygon_timeline_at_time,
+    polygon_timeline, polygon_timeline_at, polygon_timeline_at_time, polygon_timeline_in_files,
     warning_interval_duration_seconds, warning_interval_overlap_seconds,
     warning_polygon_area_square_degrees, warning_polygon_contains_point,
     warning_polygon_overlap_area_square_degrees,

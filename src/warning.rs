@@ -695,6 +695,19 @@ fn polygon_timeline_impl(
         resolve_scan_root(path)
     };
     let files = collect_inputs(path)?;
+    polygon_timeline_in_files(root, files, query_time, hint_override)
+}
+
+/// [`polygon_timeline_at_time`] over a caller-assembled file list, for callers
+/// that scope scans themselves (for example to a date window inside a large
+/// archive). Lifecycle status collapses across the whole list, so the list must
+/// contain every message of each event's lifecycle the caller wants resolved.
+pub fn polygon_timeline_in_files(
+    root: PathBuf,
+    files: Vec<PathBuf>,
+    query_time: Option<OffsetDateTime>,
+    hint_override: Option<IngestHint>,
+) -> Result<WarningTimelineReport> {
     let query_time = query_time.map(|value| value.to_offset(UtcOffset::UTC));
     let query_primitive = query_time.map(primitive_utc);
     let mut states = Vec::new();

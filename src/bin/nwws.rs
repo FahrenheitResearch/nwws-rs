@@ -70,6 +70,10 @@ fn run(mut args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
             summary_command(&path, hint)
         }
         "oi" => oi_command(&mut args),
+        "serve" => {
+            let archive = take_path_arg("serve", &mut args)?;
+            serve_command(&archive, &mut args)
+        }
         "pid201" => pid201_command(&mut args),
         "archive" => archive_command(&mut args),
         other => Err(CliError::usage(format!(
@@ -216,6 +220,7 @@ fn usage() -> &'static str {
   cargo run --bin nwws -- oi connect <username> <password> [--count <n>] [--history <n>]
   cargo run --bin nwws -- oi archive <username> <password> <archive-dir> [--count <n>] [--duration <seconds>] [--history <n>] [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- oi daemon <archive-dir> [--username <u>] [--password <p>] [--history <n>] [--reconnect-history <n>] [--archive-duplicates] [--quiet]
+  cargo run --bin nwws -- serve <archive-dir> [--bind <addr:port>] [--no-ingest] [--username <u>] [--password <p>] [--history <n>] [--reconnect-history <n>]
   cargo run --bin nwws -- pid201 inspect <capture-file> [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- pid201 split <capture-file> <output-dir>
   cargo run --bin nwws -- pid201 archive <capture-file> <archive-dir> [--format <text|json|jsonl|tool-result>]
@@ -236,6 +241,9 @@ commands:
   oi archive       open a bounded NWWS-OI XMPP session and ingest messages into ArchiveStore
   oi daemon        run supervised always-on ingest with auto-reconnect and history backfill
                    (credentials via --username/--password or NWWS_USERNAME/NWWS_PASSWORD)
+  serve            run the ingest daemon plus a self-hosted HTTP API (SSE live stream,
+                   recent products, active warnings, timeline); --no-ingest serves an
+                   existing archive without credentials (needs the serve build feature)
   pid201 inspect   force a file through the PID201 framed-stream path
   pid201 split     split a PID201 capture into canonical bulletin files
   pid201 archive   archive a PID201 capture into a deduplicated record store
@@ -1606,6 +1614,120 @@ fn oi_daemon_command(archive_dir: &Path, options: OiDaemonOptions) -> Result<(),
         summary.connect_failures + summary.ingest_failures,
     ));
     Ok(())
+}
+
+#[cfg(feature = "serve")]
+fn serve_command(
+    archive_dir: &Path,
+    args: &mut impl Iterator<Item = OsString>,
+) -> Result<(), CliError> {
+    let mut bind: std::net::SocketAddr = "127.0.0.1:8080".parse().expect("valid default bind");
+    let mut no_ingest = false;
+    let mut daemon_options = OiDaemonOptions::default();
+
+    while let Some(arg) = args.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--bind" => {
+                let value = parse_string_arg("serve", "--bind", args)?;
+                bind = value.parse().map_err(|err| {
+                    CliError::usage(format!("invalid --bind address {value}: {err}"))
+                })?;
+            }
+            "--no-ingest" => no_ingest = true,
+            "--username" | "--user" => {
+                daemon_options.username = Some(parse_string_arg("serve", "--username", args)?)
+            }
+            "--password" | "--pass" => {
+                daemon_options.password = Some(parse_string_arg("serve", "--password", args)?)
+            }
+            "--history" => {
+                daemon_options.history = parse_u32_arg("serve", "--history", args)?;
+            }
+            "--reconnect-history" => {
+                daemon_options.reconnect_history =
+                    parse_u32_arg("serve", "--reconnect-history", args)?;
+            }
+            "--archive-duplicates" => daemon_options.archive_duplicates = true,
+            "--host" => daemon_options.host = Some(parse_string_arg("serve", "--host", args)?),
+            "--domain" => {
+                daemon_options.domain = Some(parse_string_arg("serve", "--domain", args)?)
+            }
+            "--port" => daemon_options.port = Some(parse_u16_arg("serve", "--port", args)?),
+            "--room" => daemon_options.room = Some(parse_string_arg("serve", "--room", args)?),
+            "--room-service" => {
+                daemon_options.room_service =
+                    Some(parse_string_arg("serve", "--room-service", args)?)
+            }
+            "--nickname" => {
+                daemon_options.nickname = Some(parse_string_arg("serve", "--nickname", args)?)
+            }
+            "--resource" => {
+                daemon_options.resource = Some(parse_string_arg("serve", "--resource", args)?)
+            }
+            other => {
+                return Err(CliError::usage(format!(
+                    "unexpected extra argument for serve: {other}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+    }
+
+    let ingest = if no_ingest {
+        None
+    } else {
+        let (username, password) =
+            resolve_oi_credentials(daemon_options.username, daemon_options.password)?;
+        let mut config = OiClientConfig::new(username, password);
+        if let Some(host) = daemon_options.host {
+            config.host = host;
+        }
+        if let Some(domain) = daemon_options.domain {
+            config.domain = domain;
+        }
+        if let Some(port) = daemon_options.port {
+            config.port = port;
+        }
+        if let Some(room) = daemon_options.room {
+            config.room = room;
+        }
+        if let Some(room_service) = daemon_options.room_service {
+            config.room_service = room_service;
+        }
+        if let Some(nickname) = daemon_options.nickname {
+            config.nickname = nickname;
+        }
+        if let Some(resource) = daemon_options.resource {
+            config.resource = resource;
+        }
+        Some(nwws_rs::serve::ServeIngestOptions {
+            client: config,
+            daemon: DaemonOptions {
+                initial_history: daemon_options.history,
+                reconnect_history: daemon_options.reconnect_history,
+                ..DaemonOptions::default()
+            },
+            archive_duplicates: daemon_options.archive_duplicates,
+        })
+    };
+
+    nwws_rs::serve::run_server(nwws_rs::serve::ServeOptions {
+        bind,
+        archive_dir: archive_dir.to_path_buf(),
+        ingest,
+    })
+    .map_err(|err| CliError::failure(format!("server failed: {err}")))
+}
+
+#[cfg(not(feature = "serve"))]
+fn serve_command(
+    _archive_dir: &Path,
+    _args: &mut impl Iterator<Item = OsString>,
+) -> Result<(), CliError> {
+    Err(CliError::failure(
+        "this build does not include the HTTP server; reinstall with: cargo install nwws-rs --features serve"
+            .to_owned(),
+    ))
 }
 
 fn resolve_oi_credentials(
