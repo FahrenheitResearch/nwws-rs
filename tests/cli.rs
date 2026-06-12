@@ -358,6 +358,88 @@ fn active_at_tool_result_returns_archive_warning_state() {
     fs::remove_dir_all(temp).unwrap();
 }
 
+#[test]
+fn timeline_json_returns_warning_lifecycle_records() {
+    let temp = temp_dir_path("nwws_rs_cli_timeline_json");
+    fs::create_dir_all(&temp).unwrap();
+    fs::copy(
+        fixture_path("wmo_tornado_warning.txt"),
+        temp.join("warning.txt"),
+    )
+    .unwrap();
+    fs::copy(fixture_path("wmo_segmented_svs.txt"), temp.join("svs.txt")).unwrap();
+
+    let output = Command::new(bin_path())
+        .args(["timeline"])
+        .arg(&temp)
+        .args(["--at", "2026-04-21T16:25:00Z"])
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output);
+    let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["query_time_utc"], "2026-04-21T16:25:00Z");
+    assert_eq!(payload["warning_records"], 3);
+    assert_eq!(payload["failures"], 0);
+
+    let records = payload["records"].as_array().unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|record| record["lifecycle_status"] == "active")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record["event_id"].as_str().unwrap().contains("TO.W.0001"))
+    );
+
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn lead_time_tool_result_returns_point_event_metrics() {
+    let temp = temp_dir_path("nwws_rs_cli_lead_time_tool_result");
+    fs::create_dir_all(&temp).unwrap();
+    fs::copy(
+        fixture_path("wmo_tornado_warning.txt"),
+        temp.join("warning.txt"),
+    )
+    .unwrap();
+    fs::copy(fixture_path("wmo_segmented_svs.txt"), temp.join("svs.txt")).unwrap();
+
+    let output = Command::new(bin_path())
+        .args(["lead-time"])
+        .arg(&temp)
+        .args(["--event-at", "2026-04-21T16:20:00Z"])
+        .args(["--lat", "42.05"])
+        .args(["--lon", "-88.2"])
+        .args(["--format", "tool-result"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output);
+    let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["schema_version"], "wx.tool_result.v1");
+    assert_eq!(payload["tool_name"], "warning.lead_time_event_metrics");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["data"]["metrics"]["missed_event"], false);
+    assert_eq!(payload["data"]["metrics"]["lead_time_seconds"], 1200);
+    assert!(
+        payload["data"]["metrics"]["first_valid_warning_event_id"]
+            .as_str()
+            .unwrap()
+            .contains("TO.W.0001")
+    );
+    assert_eq!(
+        payload["evidence"][1]["evidence_type"],
+        "warning_lead_time_metrics"
+    );
+
+    fs::remove_dir_all(temp).unwrap();
+}
+
 fn collect_record_files(root: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(root).unwrap() {
         let entry = entry.unwrap();

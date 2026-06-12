@@ -204,6 +204,8 @@ The `nwws` binary is the fastest way to inspect real captures without writing co
 cargo run --bin nwws -- inspect <file>
 cargo run --bin nwws -- replay <directory>
 cargo run --bin nwws -- active-at <file-or-directory-or-archive> --at <utc-rfc3339>
+cargo run --bin nwws -- timeline <file-or-directory-or-archive> --at <utc-rfc3339> --format tool-result
+cargo run --bin nwws -- lead-time <file-or-directory-or-archive> --event-at <utc-rfc3339> --lat 42.05 --lon -88.20 --format tool-result
 cargo run --bin nwws -- summary <file-or-directory>
 cargo run --bin nwws -- oi connect <username> <password> --count 5
 cargo run --bin nwws -- pid201 inspect <capture-file>
@@ -212,9 +214,11 @@ cargo run --bin nwws -- pid201 archive <capture-file> <archive-dir>
 cargo run --bin nwws -- archive import <input-path> <archive-dir>
 cargo run --bin nwws -- archive verify <archive-dir>
 cargo run --bin nwws -- archive active-at <archive-dir> --at <utc-rfc3339>
+cargo run --bin nwws -- archive timeline <archive-dir> --at <utc-rfc3339> --format json
+cargo run --bin nwws -- archive lead-time <archive-dir> --event-at <utc-rfc3339> --lat 42.05 --lon -88.20 --format tool-result
 ```
 
-Inspection, replay, active-at, PID201 inspect/archive, and archive import/verify support machine-readable output with `--format json`, `--format jsonl`, or `--format tool-result`. JSON output uses the same API inspection/archive structures exposed to Python, including WMO heading parts, office, AWIPS/PIL, product family, UGC, VTEC, LAT/LON, TIME/MOT/LOC, semantic fingerprints, raw bulletin BLAKE3 hashes, and archive IDs. `active-at` returns warning P-VTEC records active at the supplied RFC3339 UTC reference, collapsed by office, VTEC event, UGC list, and event family. `--format tool-result` wraps the report in a `wx.tool_result.v1` envelope with `artifacts`, `evidence`, `limitations`, and `provenance`.
+Inspection, replay, active-at, timeline, lead-time, PID201 inspect/archive, and archive import/verify support machine-readable output with `--format json`, `--format jsonl`, or `--format tool-result`. JSON output uses the same API inspection/archive structures exposed to Python, including WMO heading parts, office, AWIPS/PIL, product family, UGC, VTEC, LAT/LON, TIME/MOT/LOC, semantic fingerprints, raw bulletin BLAKE3 hashes, and archive IDs. `active-at` returns warning P-VTEC records active at the supplied RFC3339 UTC reference, collapsed by office, VTEC event, UGC list, and event family. `timeline` returns warning lifecycle records, including issued/valid/canceled/expired times, tags, polygons, motion lines, and lifecycle status at an optional reference time. `lead-time` computes point-event warning lead time, missed-event, point-warning interval, and false-alarm-hook metrics from timeline records. `--format tool-result` wraps the report in a `wx.tool_result.v1` envelope with `artifacts`, `evidence`, `limitations`, and `provenance`.
 
 `archive import` writes canonical bulletin records under `archive/records/` and appends a `records.tsv` manifest. Re-importing the same bulletin from raw WMO, NWWS-OI XML, or PID201 captures deduplicates by normalized bulletin content.
 
