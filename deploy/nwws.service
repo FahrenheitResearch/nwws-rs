@@ -1,0 +1,32 @@
+# systemd unit for the nwws-rs self-hosted NWWS-OI API.
+#
+# Install:
+#   sudo install -m 755 nwws /usr/local/bin/nwws
+#   sudo mkdir -p /etc/nwws-rs /var/lib/nwws
+#   sudo cp deploy/env.example /etc/nwws-rs/env   # then fill in credentials
+#   sudo chmod 600 /etc/nwws-rs/env
+#   sudo cp deploy/nwws.service /etc/systemd/system/
+#   sudo systemctl enable --now nwws
+
+[Unit]
+Description=nwws-rs self-hosted NWWS-OI ingest and HTTP API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/nwws serve /var/lib/nwws/archive --bind 127.0.0.1:8080
+EnvironmentFile=/etc/nwws-rs/env
+Restart=always
+RestartSec=5
+
+# Hardening: the service only needs to write its archive directory.
+DynamicUser=yes
+StateDirectory=nwws
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/nwws
+
+[Install]
+WantedBy=multi-user.target

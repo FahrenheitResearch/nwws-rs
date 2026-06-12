@@ -1,0 +1,11 @@
+target
+.git
+.github
+fuzz
+python
+python-tests
+tools
+deploy
+dist
+*.md
+!README.md

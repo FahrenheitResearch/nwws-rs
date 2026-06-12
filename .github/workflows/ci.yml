@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --features "python serve" -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-targets --features "python serve"
+      - run: cargo bench --bench parse --no-run --features python
+
+  msrv:
+    name: MSRV check (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --features "python serve"
+
+  python:
+    name: Python wheel and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install maturin
+      - run: maturin build --release --out dist --features python
+      - run: pip install dist/*.whl
+      - run: python -m unittest discover -s python-tests -p "test_*.py"
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t nwws-rs:ci .
+      - name: Smoke test image
+        run: |
+          docker run -d --name nwws -p 18080:8080 nwws-rs:ci serve /archive --no-ingest --bind 0.0.0.0:8080
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18080/healthz; then ok=1; break; fi
+            sleep 1
+          done
+          docker logs nwws
+          test "$ok" = 1

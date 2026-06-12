@@ -13,7 +13,8 @@ FIXTURES = ROOT / "tests" / "fixtures"
 
 def framed(path: Path) -> bytes:
     bulletin = path.read_text(encoding="utf-8").splitlines()
-    return f"\u0001\r\r\n{'\r\r\n'.join(bulletin)}\r\r\n\u0003".encode("utf-8")
+    body = "\r\r\n".join(bulletin)
+    return f"\u0001\r\r\n{body}\r\r\n\u0003".encode("utf-8")
 
 
 class ApiTests(unittest.TestCase):
